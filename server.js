@@ -66,42 +66,52 @@ server.on("request", function(req, res) {
     async.doUntil(function fn(cb) {
       var keys = user_ids.splice(0, 1000);
 
-      keys.map(function(key) {
+      keys = keys.map(function(key) {
         return ["hmget", key, "firstContribution"];
       });
-
-      var multi = redis_client.multi(keys).exec(function(err, replies) {
+      console.time("multi");
+      redis_client.multi(keys).exec(function(err, replies) {
+        console.timeEnd("multi");
         if (err) {
           return cb(err);
         }
 
-        async.eachSeries(replies, function(data, done) {
-          redis_client.smembers(data[0] + ":contributions", function(err, setData) {
-            var latestContribution;
+        console.time("smembers multi");
+        redis_client.multi(replies.map(function(r) {
+          return ["smembers", r[0] + ":contributions"]
+        })).exec(function(err, setReplies) {
+          console.timeEnd("smembers multi");
+          if (err) {
+            return cb(err);
+          }
 
-            setData.forEach(function(date) {
-              date = (new Date(date)).valueOf();
-              if ( !latestContribution ) {
-                return latestContribution = date;
+          async.eachSeries(replies, function(data, done) {
+              var latestContribution;
+              var setData = setReplies[replies.indexOf(data)];
+
+              setData.forEach(function(date) {
+                date = (new Date(date)).valueOf();
+                if ( !latestContribution ) {
+                  return latestContribution = date;
+                }
+                if ( date < queryDate && date > latestContribution ) {
+                  latestContribution = date;
+                }
+              });
+
+              var firstContribution = new Date(data[1]).valueOf();
+
+              // This will introduce errors over time. As latest contribution date will move ahead of query dates for historic data.
+              if (!isNaN(latestContribution) && (latestContribution > one_year_ago) && (latestContribution < queryDate)) {
+                total_active_contributors++;
               }
-              if ( date < queryDate && date > latestContribution ) {
-                latestContribution = date;
+              if (!isNaN(firstContribution) && (firstContribution > seven_days_ago) && (latestContribution < queryDate)) {
+                new_contributors_7_days++;
               }
-            });
 
-            var firstContribution = new Date(data[1]).valueOf();
-
-            // This will introduce errors over time. As latest contribution date will move ahead of query dates for historic data.
-            if (!isNaN(latestContribution) && (latestContribution > one_year_ago) && (latestContribution < queryDate)) {
-              total_active_contributors++;
-            }
-            if (!isNaN(firstContribution) && (firstContribution > seven_days_ago) && (latestContribution < queryDate)) {
-              new_contributors_7_days++;
-            }
-
-            done();
-          });
-        }, cb);
+              done();
+          }, cb);
+        });
       });
     }, function test() {
       return user_ids.length === 0;
