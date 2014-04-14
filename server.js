@@ -37,6 +37,7 @@ server.on("request", function(req, res) {
 
   var scan_index = 0;
   var user_ids = [];
+
   async.doUntil(function fn(cb) {
     redis_client.scan([scan_index, "count", 1000], function(err, data) {
       if (err) {
@@ -65,29 +66,35 @@ server.on("request", function(req, res) {
 
     async.doUntil(function fn(cb) {
       var keys = user_ids.splice(0, 1000);
-
+      var replyMap = {};
+      var replyKeys;
       keys = keys.map(function(key) {
         return ["hmget", key, "firstContribution"];
       });
-      console.time("multi");
       redis_client.multi(keys).exec(function(err, replies) {
-        console.timeEnd("multi");
         if (err) {
           return cb(err);
         }
 
-        console.time("smembers multi");
-        redis_client.multi(replies.map(function(r) {
-          return ["smembers", r[0] + ":contributions"]
+        keys.forEach(function(arr, idx) {
+          if ( !replies[arr[1]] ) {
+            return
+          }
+          replyMap[arr[1]] = replies[arr[1]];
+        });
+
+        replyKeys = Object.keys(replyMap);
+
+        redis_client.multi(replyKeys.map(function(k) {
+          return ["smembers", k + ":contributions"];
         })).exec(function(err, setReplies) {
-          console.timeEnd("smembers multi");
           if (err) {
             return cb(err);
           }
-
-          async.eachSeries(replies, function(data, done) {
+          async.eachSeries(replyKeys, function(key, done) {
               var latestContribution;
-              var setData = setReplies[replies.indexOf(data)];
+              var idx = replyKeys.indexOf(key);
+              var setData = setReplies[idx];
 
               setData.forEach(function(date) {
                 date = (new Date(date)).valueOf();
@@ -99,7 +106,7 @@ server.on("request", function(req, res) {
                 }
               });
 
-              var firstContribution = new Date(data[1]).valueOf();
+              var firstContribution = new Date(replyMap[key]).valueOf();
 
               // This will introduce errors over time. As latest contribution date will move ahead of query dates for historic data.
               if (!isNaN(latestContribution) && (latestContribution > one_year_ago) && (latestContribution < queryDate)) {
@@ -119,7 +126,6 @@ server.on("request", function(req, res) {
       if (err) {
         return res.end(JSON.stringify({error: err.toString()}));
       }
-
       res.end(JSON.stringify({
         total_active_contributors: total_active_contributors,
         new_contributors_7_days: new_contributors_7_days
